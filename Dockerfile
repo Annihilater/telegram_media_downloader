@@ -1,4 +1,4 @@
-FROM python:3.11.2-alpine As compile-image
+FROM python:3.11.9-alpine As compile-image
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN apk add --no-cache --virtual .build-deps gcc musl-dev \
 
 RUN apk add --no-cache rclone
 
-FROM python:3.11.2-alpine As runtime-image
+FROM python:3.11.9-alpine As runtime-image
 
 WORKDIR /app
 

@@ -21,6 +21,7 @@ from media_downloader import (
     download_media,
     download_task,
     main,
+    save_msg_to_file,
     worker,
 )
 from module.app import Application, DownloadStatus, TaskNode
@@ -85,23 +86,6 @@ def os_get_file_size(file: str) -> int:
     return 0
 
 
-def new_set_download_id(
-    chat_id: Union[int, str], message_id: int, download_status: DownloadStatus
-):
-    if download_status is DownloadStatus.SuccessDownload:
-        app.total_download_task += 1
-    if chat_id not in app.chat_download_config:
-        return
-    app.chat_download_config[chat_id].last_read_message_id = max(
-        app.chat_download_config[chat_id].last_read_message_id, message_id
-    )
-    if download_status is not DownloadStatus.FailedDownload:
-        app.chat_download_config[chat_id].downloaded_ids.append(message_id)
-    else:
-        app.chat_download_config[chat_id].failed_ids.append(message_id)
-    app.is_running = False
-
-
 def rest_app(conf: dict):
     config_test = os.path.join(os.path.abspath("."), "config_test.yaml")
     data_test = os.path.join(os.path.abspath("."), "data_test.yaml")
@@ -113,7 +97,6 @@ def rest_app(conf: dict):
     app.is_running = True
     app.chat_download_config: dict = {}
     # app.already_download_ids_set = set()
-    app.disable_syslog: list = []
     app.save_path = os.path.abspath(".")
     app.api_id: str = ""
     app.api_hash: str = ""
@@ -154,8 +137,8 @@ async def new_upload_telegram_chat(
     app: Application,
     node: TaskNode,
     message: pyrogram.types.Message,
-    file_name: str,
     download_status: DownloadStatus,
+    file_name: str = None,
 ):
     pass
 
@@ -204,7 +187,8 @@ async def async_get_media_meta(chat_id, message, message_media, _type):
 async def async_download_media(
     client, message, media_types, file_formats, chat_id=-123
 ):
-    return await download_media(client, message, media_types, file_formats, chat_id)
+    node = TaskNode(chat_id=chat_id)
+    return await download_media(client, message, media_types, file_formats, node)
 
 
 def mock_move_to_download_path(temp_download_path: str, download_path: str):
@@ -362,11 +346,16 @@ class MockClient:
         return True
 
 
+def check_for_updates(_: dict = None):
+    pass
+
+
 @mock.patch("media_downloader.get_extension", new=get_extension)
 @mock.patch("module.pyrogram_extension.get_extension", new=get_extension)
 @mock.patch("media_downloader.fetch_message", new=new_fetch_message)
 @mock.patch("media_downloader.get_chat_history_v2", new=get_chat_history)
 @mock.patch("media_downloader.RETRY_TIME_OUT", new=0)
+@mock.patch("media_downloader.check_for_updates", new=check_for_updates)
 class MediaDownloaderTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -860,7 +849,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
         )
         self.assertEqual((DownloadStatus.FailedDownload, None), result)
 
-    @mock.patch("media_downloader.pyrogram.Client", new=MockClient)
+    @mock.patch("media_downloader.HookClient", new=MockClient)
     @mock.patch("media_downloader.asyncio.Queue.put")
     def test_download_task(self, moc_put):
         rest_app(MOCK_CONF)
@@ -897,6 +886,35 @@ class MediaDownloaderTestCase(unittest.TestCase):
 
         result2 = _is_exist(this_dir)
         self.assertEqual(result2, False)
+
+    @mock.patch("media_downloader.os.makedirs")
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_save_msg_to_file(self, mock_open, mock_makedirs):
+        rest_app(MOCK_CONF)
+        app.enable_download_txt = True
+        app.temp_save_path = "/tmp"
+        app.date_format = "%Y_%m"
+
+        message = MockMessage(
+            id=123,
+            dis_chat=True,
+            chat=Chat(chat_id=456, chat_title="Test Chat"),
+            date=datetime(2023, 5, 15, 10, 30, 0),
+            text="This is a test message",
+        )
+
+        expected_file_path = platform_generic_path(
+            "/root/project/Test Chat/2023_05/123.txt"
+        )
+
+        result = self.loop.run_until_complete(save_msg_to_file(app, 456, message))
+
+        self.assertEqual(result, (DownloadStatus.SuccessDownload, expected_file_path))
+        mock_makedirs.assert_called_once_with(
+            os.path.dirname(expected_file_path), exist_ok=True
+        )
+        mock_open.assert_called_once_with(expected_file_path, "w", encoding="utf-8")
+        mock_open().write.assert_called_once_with("This is a test message")
 
     @mock.patch("media_downloader.RETRY_TIME_OUT", new=0)
     @mock.patch("media_downloader.os.path.getsize", new=os_get_file_size)
@@ -977,7 +995,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
 
         self.assertEqual(res, (DownloadStatus.SkipDownload, None))
 
-    @mock.patch("media_downloader.pyrogram.Client", new=MockClient)
+    @mock.patch("media_downloader.HookClient", new=MockClient)
     @mock.patch("media_downloader.RETRY_TIME_OUT", new=1)
     @mock.patch("media_downloader.logger")
     def test_main_with_bot(self, mock_logger):
@@ -990,7 +1008,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
         )
 
     @mock.patch("media_downloader.app.pre_run", new=raise_keyboard_interrupt)
-    @mock.patch("media_downloader.pyrogram.Client", new=MockClient)
+    @mock.patch("media_downloader.HookClient", new=MockClient)
     @mock.patch("media_downloader.RETRY_TIME_OUT", new=1)
     @mock.patch("media_downloader.logger")
     def test_keyboard_interrupt(self, mock_logger):
@@ -1004,7 +1022,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
         )
 
     @mock.patch("media_downloader.app.pre_run", new=raise_exception)
-    @mock.patch("media_downloader.pyrogram.Client", new=MockClient)
+    @mock.patch("media_downloader.HookClient", new=MockClient)
     @mock.patch("media_downloader.RETRY_TIME_OUT", new=1)
     @mock.patch("media_downloader.logger")
     def test_other_exception(self, mock_logger):
