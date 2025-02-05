@@ -1,9 +1,13 @@
 """provide upload cloud drive"""
 import asyncio
+import functools
 import importlib
+import inspect
 import os
+import re
 from asyncio import subprocess
 from subprocess import Popen
+from typing import Callable
 from zipfile import ZipFile
 
 from loguru import logger
@@ -56,7 +60,7 @@ class CloudDrive:
     def rclone_mkdir(drive_config: CloudDriveConfig, remote_dir: str):
         """mkdir in remote"""
         with Popen(
-            f'"{drive_config.rclone_path}" mkdir {remote_dir}/',
+            f'"{drive_config.rclone_path}" mkdir "{remote_dir}/"',
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -83,9 +87,14 @@ class CloudDrive:
 
         return zip_file_name
 
+    # pylint: disable = R0914
     @staticmethod
     async def rclone_upload_file(
-        drive_config: CloudDriveConfig, save_path: str, local_file_path: str
+        drive_config: CloudDriveConfig,
+        save_path: str,
+        local_file_path: str,
+        progress_callback: Callable = None,
+        progress_args: tuple = (),
     ) -> bool:
         """Use Rclone upload file"""
         upload_status: bool = False
@@ -111,14 +120,15 @@ class CloudDrive:
 
             cmd = (
                 f'"{drive_config.rclone_path}" copy "{file_path}" '
-                f"{remote_dir}/ --create-empty-src-dirs --ignore-existing --progress"
+                f'"{remote_dir}/" --create-empty-src-dirs --ignore-existing --progress'
             )
             proc = await asyncio.create_subprocess_shell(
                 cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
             )
             if proc.stdout:
                 async for output in proc.stdout:
-                    s = output.decode()
+                    s = output.decode(errors="replace")
+                    print(s)
                     if "Transferred" in s and "100%" in s and "1 / 1" in s:
                         logger.info(f"upload file {local_file_path} success")
                         drive_config.total_upload_success_file_count += 1
@@ -127,6 +137,26 @@ class CloudDrive:
                         if drive_config.before_upload_file_zip:
                             os.remove(zip_file_path)
                         upload_status = True
+                    else:
+                        pattern = (
+                            r"Transferred: (.*?) / (.*?), (.*?)%, (.*?/s)?, ETA (.*?)$"
+                        )
+                        transferred_match = re.search(pattern, s)
+
+                        if transferred_match:
+                            if progress_callback:
+                                func = functools.partial(
+                                    progress_callback,
+                                    transferred_match.group(1),
+                                    transferred_match.group(2),
+                                    transferred_match.group(3),
+                                    transferred_match.group(4),
+                                    transferred_match.group(5),
+                                    *progress_args,
+                                )
+
+                            if inspect.iscoroutinefunction(progress_callback):
+                                await func()
 
             await proc.wait()
         except Exception as e:
@@ -152,6 +182,7 @@ class CloudDrive:
                 + os.path.dirname(local_file_path).replace(save_path, "")
                 + "/"
             ).replace("\\", "/")
+
             if not drive_config.dir_cache.get(remote_dir):
                 CloudDrive.aligo_mkdir(drive_config, remote_dir)
                 aligo_dir = drive_config.aligo.get_folder_by_path(remote_dir)
